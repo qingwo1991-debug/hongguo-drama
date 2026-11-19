@@ -1,0 +1,150 @@
+# 红果 Android 个人版 / TV 版 APK 构建：在 GitHub Actions 上完成编译、签名与产物上传。
+# 本机不做 Android SDK 安装、APK 构建或依赖安装；本 workflow 是唯一编译入口。
+name: Android APK build
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 构建目标（both=手机+TV，phone=仅手机，tv=仅TV）
+        type: choice
+        options: [both, phone, tv]
+        default: both
+      source_sha:
+        description: 冻结源码完整 SHA（留空则构建当前分支 HEAD）
+        type: string
+        default: ''
+  push:
+    branches: ['android/**']
+permissions:
+  contents: read
+env:
+  # 推送事件固定双端构建；手动触发按 variant 选择。短路表达式避免在 push 事件引用 inputs。
+  BUILD_PHONE: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.variant != 'tv') }}
+  BUILD_TV: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.variant != 'phone') }}
+  ANDROID_HOME: ${{ runner.temp }}/android-sdk
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+
+      - name: Verify source identity (manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.source_sha != '' }}
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            android/package-lock.json
+
+      - name: Cache Android SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/android-sdk
+          key: android-sdk-v1
+
+      - name: Install Android SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$RUNNER_TEMP/android-sdk"
+          mkdir -p "$SDK/cmdline-tools"
+          curl -fsSL -o "$RUNNER_TEMP/cmdline-tools.zip" https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$SDK/cmdline-tools"
+          mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          ( yes || true ) | "$SDKMANAGER" --licenses > /dev/null
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          npm ci --no-audit --no-fund
+          npm --prefix android ci --ignore-scripts --no-audit --no-fund
+
+      - name: Android tests
+        shell: bash
+        run: npm --prefix android test
+
+      - name: Restore signing keys from secrets
+        shell: bash
+        env:
+          PHONE_KEY_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          PHONE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TV_KEY_B64: ${{ secrets.ANDROID_TV_KEYSTORE_B64 }}
+          TV_PASS: ${{ secrets.ANDROID_TV_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p android/.private/tv
+          chmod 700 android/.private
+          if [[ -n "${PHONE_KEY_B64:-}" && -n "${PHONE_PASS:-}" ]]; then
+            printf '%s' "$PHONE_KEY_B64" | base64 -d > android/.private/install.p12
+            chmod 600 android/.private/install.p12
+            printf '%s' "$PHONE_PASS" > android/.private/password
+            chmod 600 android/.private/password
+            echo '手机签名密钥已从 secrets 恢复'
+          elif [[ -n "${PHONE_KEY_B64:-}" || -n "${PHONE_PASS:-}" ]]; then
+            echo '::warning::手机签名密钥与密码只提供其一，本轮将由 build.py 自动生成新密钥'
+          else
+            echo '::warning::未提供手机签名 secrets，本轮将由 build.py 自动生成新密钥（无法覆盖升级旧包）'
+          fi
+          if [[ -n "${TV_KEY_B64:-}" && -n "${TV_PASS:-}" ]]; then
+            printf '%s' "$TV_KEY_B64" | base64 -d > android/.private/tv/install.p12
+            chmod 600 android/.private/tv/install.p12
+            printf '%s' "$TV_PASS" > android/.private/tv/password
+            chmod 600 android/.private/tv/password
+            echo 'TV 签名密钥已从 secrets 恢复'
+          elif [[ -n "${TV_KEY_B64:-}" || -n "${TV_PASS:-}" ]]; then
+            echo '::warning::TV 签名密钥与密码只提供其一，本轮将由 build.py 自动生成新密钥'
+          else
+            echo '::warning::未提供 TV 签名 secrets，本轮将由 build.py 自动生成新密钥（无法覆盖升级旧包）'
+          fi
+
+      - name: Build phone APK
+        if: ${{ env.BUILD_PHONE == 'true' }}
+        shell: bash
+        run: python3 android/build.py
+
+      - name: Build TV APK
+        if: ${{ env.BUILD_TV == 'true' }}
+        shell: bash
+        run: python3 android/build.py --tv
+
+      - name: Upload phone APK
+        if: ${{ env.BUILD_PHONE == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hongguo-personal-apk
+          path: |
+            android/build/hongguo-personal-1.1.apk
+            android/build/verification.json
+            android/build/signature.txt
+          if-no-files-found: error
+
+      - name: Upload TV APK
+        if: ${{ env.BUILD_TV == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hongguo-tv-apk
+          path: |
+            android/build/tv/*.apk
+            android/build/tv/verification.json
+            android/build/tv/signature.txt
+          if-no-files-found: error
