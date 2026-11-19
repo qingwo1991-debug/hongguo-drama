@@ -21,7 +21,7 @@ env:
   # 推送事件固定双端构建；手动触发按 variant 选择。短路表达式避免在 push 事件引用 inputs。
   BUILD_PHONE: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.variant != 'tv') }}
   BUILD_TV: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.variant != 'phone') }}
-  ANDROID_HOME: ${{ runner.temp }}/android-sdk
+  ANDROID_HOME: ${{ github.workspace }}/.android-sdk
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -56,7 +56,7 @@ jobs:
         id: sdk-cache
         uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/android-sdk
+          path: ${{ github.workspace }}/.android-sdk
           key: android-sdk-v1
 
       - name: Install Android SDK
@@ -64,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SDK="$RUNNER_TEMP/android-sdk"
+          SDK="$ANDROID_HOME"
           mkdir -p "$SDK/cmdline-tools"
           curl -fsSL -o "$RUNNER_TEMP/cmdline-tools.zip" https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$SDK/cmdline-tools"
