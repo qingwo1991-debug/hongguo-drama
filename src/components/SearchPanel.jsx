@@ -26,8 +26,12 @@ function SearchPanel({ onSelectSeries, onViewSeries, onSwitchToInput, active = t
   const [history, setHistory] = useState(readSearchHistory);
   const [historyError, setHistoryError] = useState('');
   const inputRef = useRef(null);
+  const isAndroid = window.electronAPI?.platform === 'android';
   useEffect(() => {
     // Chromium's native datalist can stay at its old screen position after a container scroll.
+    // Android WebView has no datalist popup, and the IME open/close fires resize (adjustResize);
+    // blurring there dismisses the keyboard the moment it appears.
+    if (isAndroid) return undefined;
     const dismissSuggestions = () => inputRef.current?.blur();
     window.addEventListener('scroll', dismissSuggestions, true);
     window.addEventListener('resize', dismissSuggestions);
@@ -35,7 +39,7 @@ function SearchPanel({ onSelectSeries, onViewSeries, onSwitchToInput, active = t
       window.removeEventListener('scroll', dismissSuggestions, true);
       window.removeEventListener('resize', dismissSuggestions);
     };
-  }, []);
+  }, [isAndroid]);
   const suggestions = getSearchSuggestions(keyword, history);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState(null); // null=未搜索, []=无结果
